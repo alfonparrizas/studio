@@ -1,7 +1,8 @@
 # mi_agente_de_viajes/sistema_de_reservas/agent.py
+import json # Added import for json
 from google.adk.agents import LlmAgent
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 # Importaciones para BigQuery
 from google.cloud import bigquery
@@ -9,7 +10,7 @@ import uuid
 import datetime
 
 # --- Configuración del Modelo ---
-MODEL_ID = "gemini-2.0-flash-001"
+MODEL_ID = "gemini-2.0-flash-001" # Consistent model ID
 
 # --- Configuración de BigQuery ---
 BIGQUERY_PROJECT_ID = "fon-test-project"
@@ -27,7 +28,7 @@ Tus responsabilidades principales son:
 - Actualizar el estado de una solicitud de viaje específica.
 
 Estados Comunes de Solicitudes y sus Significados (para tu conocimiento interno y para interpretar consultas):
-- 'Registrada': Solicitudes nuevas. Si el usuario pregunta por "pendientes", "nuevas", o "sin revisar", podría referirse a este estado o a una combinación con 'Pendiente de Aprobación'.
+- 'Registrada': Solicitudes nuevas. Si el usuario pregunta por "pendientes", "nuevas", o "sin revisar", podría referirte a este estado o a una combinación con 'Pendiente de Aprobación'.
 - 'Pendiente de Aprobación': Solicitudes revisadas y esperando decisión.
 - 'Aprobada': Solicitudes aprobadas.
 - 'Rechazada': Solicitudes no aprobadas.
@@ -38,7 +39,7 @@ Estados Comunes de Solicitudes y sus Significados (para tu conocimiento interno 
 Instrucciones para las herramientas:
 
 1. Para registrar una nueva solicitud de viaje:
-   - Recopila la siguiente información esencial: Nombre del empleado (pila), Apellidos del empleado, ID de empleado, Ciudad de Origen del viaje, Ciudad de Destino del viaje, Fecha de inicio (formato<y_bin_46>MM-DD), Fecha de fin (formato<y_bin_46>MM-DD), Medio de Transporte Preferido (Avión, Tren, Autobús, Coche), Tipo de Coche si aplica (Particular o Alquiler), y Motivo del viaje.
+   - Recopila la siguiente información esencial: Nombre del empleado (pila), Apellidos del empleado, ID de empleado, Ciudad de Origen del viaje, Ciudad de Destino del viaje, Fecha de inicio (formato YYYY-MM-DD), Fecha de fin (formato YYYY-MM-DD), Medio de Transporte Preferido (Avión, Tren, Autobús, Coche), Tipo de Coche si aplica (Particular o Alquiler), y Motivo del viaje.
    - **Validación de Fechas Importante:**
      - Ambas fechas, inicio y fin, DEBEN ser futuras a la fecha actual ({datetime.datetime.now().strftime('%Y-%m-%d')}).
      - Si el usuario proporciona solo día y mes (ej. "15 de junio"), asume el año actual ({datetime.datetime.now().year}) para completar la fecha. Verifica que esta fecha resultante sea futura.
@@ -48,18 +49,28 @@ Instrucciones para las herramientas:
    - Argumentos para 'request_travel_booking_logic': employee_first_name (str), employee_last_name (str), employee_id (str), origin_city (str), destination_city (str), start_date (str), end_date (str), transport_mode (str), reason (str), y opcionalmente car_type (str).
 
 2. Para consultar solicitudes de viaje por estado:
-   - Intenta comprender a qué estado o grupo de estados se refiere el usuario.
-   - Llama a la herramienta 'get_travel_requests_by_status' con el argumento: search_term (str).
-   - **La herramienta 'get_travel_requests_by_status' devolverá la información formateada como una tabla en texto (Markdown). Cuando recibas su respuesta, preséntala directamente al usuario. Evita re-interpretarla o resumirla a menos que sea un mensaje de error o que no se encuentren resultados. Si es una tabla, muéstrala lo más fielmente posible.**
+   - **Proceso Estricto:** Cuando el usuario pida consultar solicitudes por estado (ej. 'Aprobada', 'Pendiente'):
+     1. **Identifica el `search_term`** basado en la petición del usuario.
+     2. **Llama INMEDIATAMENTE a la herramienta `get_travel_requests_by_status`** con este `search_term`.
+     3. **NO GENERES NINGUNA RESPUESTA AL USUARIO ANTES DE RECIBIR EL RESULTADO DE LA HERRAMIENTA.** Espera la cadena JSON de la herramienta.
+     4. **Una vez que la herramienta devuelva el JSON, analiza su contenido y USA ÚNICAMENTE ESE CONTENIDO para formular tu respuesta completa y final al usuario en este mismo turno.**
+        - La herramienta devolverá datos como una cadena JSON: `{{"search_term": "...", "count": N, "requests": [{{"request_id": "...", ...}}], "message": "... opcional ..."}}` o `{{"message": "No se encontraron..."}}` o `{{"error": "..."}}`.
+        - Si el JSON tiene `"count" > 0` y una lista de `"requests"`: Responde con algo como: "He encontrado [count] solicitudes [search_term]. Aquí están:
+          - ID: [request_id_1], Empleado: [employee_name_1], Destino: [destination_city_1], Fechas: [start_date_1] a [end_date_1], Motivo: [reason_1]
+          - ID: [request_id_2], Empleado: [employee_name_2], Destino: [destination_city_2], Fechas: [start_date_2] a [end_date_2], Motivo: [reason_2]
+          (Continúa para todas las solicitudes en la lista `requests`)"
+        - Si el JSON tiene un `"message"` (ej. no se encontraron resultados): Responde directamente con ese mensaje. Por ejemplo: "No se encontraron solicitudes para el término: [search_term]."
+        - Si el JSON tiene un `"error"`: Responde informando del error. Por ejemplo: "Hubo un error al consultar las solicitudes: [error_message]."
+     5. **ASEGÚRATE de que tu respuesta al usuario sea la presentación directa de los datos (o mensaje de no datos/error) recibidos de la herramienta, sin comentarios adicionales tuyos antes de presentar estos datos.**
 
 3. Para actualizar el estado de una solicitud de viaje:
    - Necesitarás el ID de la solicitud ('request_id') y el nuevo estado ('new_status').
    - Pregunta al usuario por estos datos si no los proporciona. Asegúrate de que 'new_status' sea uno de los estados válidos listados arriba.
    - Llama a la herramienta 'update_travel_request_status' con los argumentos: request_id (str) y new_status (str).
+   - Después de llamar a la herramienta, informa al usuario del resultado que devuelva la herramienta (confirmación o error).
 
 Reglas Generales:
 - NO inventes información para las herramientas. Pide al usuario cualquier dato que falte.
-- Informa al usuario del resultado después de cada llamada a herramienta.
 - Sé siempre cortés y profesional.
 - La fecha actual es: {datetime.datetime.now().strftime('%Y-%m-%d')}. Considera esto para inferir años si el usuario solo da día y mes para las fechas de viaje.
 """
@@ -71,14 +82,14 @@ class _TravelBookingArgsSchema(BaseModel):
     employee_id: str = Field(description="ID del empleado.")
     origin_city: str = Field(description="Ciudad de origen del viaje.")
     destination_city: str = Field(description="Ciudad de destino del viaje.")
-    start_date: str = Field(description="Fecha de inicio del viaje en formato<y_bin_46>MM-DD.")
-    end_date: str = Field(description="Fecha de fin del viaje en formato<y_bin_46>MM-DD.")
+    start_date: str = Field(description="Fecha de inicio del viaje en formato YYYY-MM-DD.")
+    end_date: str = Field(description="Fecha de fin del viaje en formato YYYY-MM-DD.")
     transport_mode: str = Field(description="Medio de transporte preferido.")
     reason: str = Field(description="Motivo del viaje.")
     car_type: Optional[str] = Field(default=None, description="Tipo de coche si es 'Coche' (Particular o Alquiler).")
 
 class _GetTravelRequestsArgsSchema(BaseModel):
-    search_term: str = Field(description="El estado o término de búsqueda para las solicitudes.")
+    search_term: str = Field(description="El estado o término de búsqueda para las solicitudes (ej. 'Cancelada', 'Pendiente', 'Registrada').")
 
 class _UpdateTravelRequestArgsSchema(BaseModel):
     request_id: str = Field(description="ID de la solicitud a actualizar.")
@@ -99,19 +110,17 @@ def request_travel_booking_logic(
     car_type: Optional[str] = None
 ) -> str:
     """Registra una solicitud de reserva de viaje en BigQuery con el nuevo esquema.
-
     Args:
         employee_first_name (str): Nombre del empleado (pila).
         employee_last_name (str): Apellidos del empleado.
         employee_id (str): ID del empleado.
         origin_city (str): Ciudad de origen del viaje.
         destination_city (str): Ciudad de destino del viaje.
-        start_date (str): Fecha de inicio del viaje en formato<y_bin_46>MM-DD.
-        end_date (str): Fecha de fin del viaje en formato<y_bin_46>MM-DD.
+        start_date (str): Fecha de inicio del viaje en formato YYYY-MM-DD.
+        end_date (str): Fecha de fin del viaje en formato YYYY-MM-DD.
         transport_mode (str): Medio de transporte preferido (Avión, Tren, Autobús, Coche).
         reason (str): Motivo del viaje.
         car_type (str, optional): Tipo de coche si es 'Coche' (Particular o Alquiler).
-
     Returns:
         str: Mensaje de confirmación o error.
     """
@@ -128,7 +137,7 @@ def request_travel_booking_logic(
         if end_date_obj < start_date_obj:
             return "Error en la herramienta: La fecha de fin no puede ser anterior a la fecha de inicio."
     except ValueError:
-        return "Error en la herramienta: El formato de las fechas no es válido. Utiliza<y_bin_46>MM-DD."
+        return "Error en la herramienta: El formato de las fechas no es válido. Utiliza YYYY-MM-DD."
 
     try:
         client = bigquery.Client()
@@ -166,7 +175,7 @@ def request_travel_booking_logic(
             ]
         )
         query_job = client.query(query, job_config=job_config)
-        query_job.result() 
+        query_job.result()
 
         if query_job.errors:
             error_messages = "; ".join([str(error["message"]) for error in query_job.errors])
@@ -190,16 +199,15 @@ def request_travel_booking_logic(
         print(f"[LOG request_travel_booking_logic - ERROR]: {e}")
         return f"Error técnico al registrar la solicitud: {e}."
 
-# --- Lógica de la Herramienta 2: Consultar Solicitudes por Estado (Devuelve Markdown) ---
+# --- Lógica de la Herramienta 2: Consultar Solicitudes por Estado (Devuelve JSON) ---
 def get_travel_requests_by_status(search_term: str) -> str:
-    """Consulta solicitudes de viaje. Puede buscar por un estado exacto o interpretar términos comunes como 'pendientes'.
-    Devuelve los resultados en formato de tabla Markdown.
-
+    """Consulta solicitudes de viaje por estado o término.
+    Devuelve los resultados como una cadena JSON.
+    El JSON contendrá las solicitudes o un mensaje de 'no encontrado' o de error.
     Args:
         search_term (str): El estado exacto (ej. 'Registrada', 'Aprobada') o un término general (ej. 'pendientes').
-
     Returns:
-        str: Una cadena formateada como tabla Markdown con las solicitudes encontradas o un mensaje si no hay ninguna o si ocurre un error.
+        str: Una cadena JSON con las solicitudes encontradas, o un mensaje si no hay ninguna/error.
     """
     try:
         client = bigquery.Client()
@@ -213,11 +221,9 @@ def get_travel_requests_by_status(search_term: str) -> str:
            "sin aprobar" in processed_search_term or \
            "nuevas" in processed_search_term or \
            ("registrada" in processed_search_term and "aprobaci" not in processed_search_term) :
-            
             param_counter += 1
             status_conditions.append(f"LOWER(status) = LOWER(@status_param_{param_counter})")
             query_params.append(bigquery.ScalarQueryParameter(f"status_param_{param_counter}", "STRING", "Registrada"))
-            
             if "aprobaci" in processed_search_term or "pendiente" in processed_search_term :
                  param_counter += 1
                  if not any(p.value.lower() == "pendiente de aprobación" for p in query_params):
@@ -227,23 +233,28 @@ def get_travel_requests_by_status(search_term: str) -> str:
         exact_final_statuses = ["aprobada", "rechazada", "reservada", "completada", "cancelada"]
         if processed_search_term in exact_final_statuses or \
            (not status_conditions and processed_search_term):
-            status_conditions = [] 
+            capitalized_search = search_term.strip().capitalize()
+            if capitalized_search in [s.capitalize() for s in exact_final_statuses]:
+                 search_term_final = capitalized_search
+            else:
+                 search_term_final = search_term.strip()
+            status_conditions = []
             query_params = []
             param_counter = 0
-            
             param_counter += 1
-            status_conditions.append(f"LOWER(status) = LOWER(@status_param_{param_counter})")
-            query_params.append(bigquery.ScalarQueryParameter(f"status_param_{param_counter}", "STRING", search_term.strip().capitalize()))
+            status_conditions.append(f"status = @status_param_{param_counter}")
+            query_params.append(bigquery.ScalarQueryParameter(f"status_param_{param_counter}", "STRING", search_term_final))
 
         if not status_conditions:
              print(f"[LOG get_travel_requests_by_status]: Término no interpretado '{search_term}'.")
-             return f"No pude interpretar el término de búsqueda de estado: '{search_term}'."
+             return json.dumps({
+                 "error": f"No pude interpretar el término de búsqueda de estado: '{search_term}'. Intenta usar uno de los estados conocidos (Registrada, Pendiente de Aprobación, Aprobada, Rechazada, Reservada, Completada, Cancelada)."
+             })
 
         where_clause = " OR ".join(status_conditions)
-        # Seleccionamos campos para la tabla
         query = f"""
-            SELECT request_id, employee_first_name, employee_last_name, 
-                   destination_city, start_date, end_date, status
+            SELECT request_id, employee_first_name, employee_last_name,
+                   origin_city, destination_city, start_date, end_date, transport_mode, car_type, reason, status
             FROM `{table_ref_str}` WHERE {where_clause} ORDER BY timestamp DESC LIMIT 10
         """
         job_config = bigquery.QueryJobConfig(query_parameters=query_params)
@@ -252,75 +263,83 @@ def get_travel_requests_by_status(search_term: str) -> str:
 
         if results.total_rows == 0:
             print(f"[LOG get_travel_requests_by_status]: No se encontraron solicitudes para '{search_term}'.")
-            return f"No se encontraron solicitudes de viaje para el término: '{search_term}'."
+            return json.dumps({
+                "search_term": search_term,
+                "count": 0,
+                "requests": [],
+                "message": f"No se encontraron solicitudes de viaje para el término: '{search_term}'."
+            })
 
-        headers = ["ID Solicitud", "Empleado", "Destino", "Inicio", "Fin", "Estado"]
-        table_md = f"Se encontraron {results.total_rows} solicitudes para '{search_term}':\n\n"
-        table_md += "| " + " | ".join(headers) + " |\n"
-        table_md += "| " + " | ".join(["---"] * len(headers)) + " |\n"
-
+        output_requests = []
         for row in results:
             employee_full_name = f"{row.employee_first_name or ''} {row.employee_last_name or ''}".strip()
-            row_data = [
-                str(row.request_id or "N/A"),
-                str(employee_full_name or "N/A"),
-                str(row.destination_city or "N/A"),
-                str(row.start_date) if row.start_date else "N/A",
-                str(row.end_date) if row.end_date else "N/A",
-                str(row.status or "N/A")
-            ]
-            table_md += "| " + " | ".join(row_data) + " |\n"
+            request_data = {
+                "request_id": str(row.request_id or "N/A"),
+                "employee_name": str(employee_full_name or "N/A"),
+                "origin_city": str(row.origin_city or "N/A"),
+                "destination_city": str(row.destination_city or "N/A"),
+                "start_date": str(row.start_date) if row.start_date else "N/A",
+                "end_date": str(row.end_date) if row.end_date else "N/A",
+                "transport_mode": str(row.transport_mode or "N/A"),
+                "car_type": str(row.car_type or "N/A") if row.car_type else None,
+                "reason": str(row.reason or "N/A"),
+                "status": str(row.status or "N/A")
+            }
+            output_requests.append(request_data)
         
-        print(f"[LOG DE HERRAMIENTA get_travel_requests_by_status]: Tabla Markdown generada.")
-        return table_md
+        print(f"[LOG DE HERRAMIENTA get_travel_requests_by_status]: JSON generado para '{search_term}'.")
+        return json.dumps({
+            "search_term": search_term,
+            "count": results.total_rows,
+            "requests": output_requests
+        })
 
     except Exception as e:
         print(f"[LOG DE HERRAMIENTA get_travel_requests_by_status - ERROR]: {e}")
-        return f"Error técnico al consultar las solicitudes de viaje: {e}."
+        return json.dumps({"error": f"Error técnico al consultar las solicitudes de viaje: {e}."})
 
 # --- Lógica de la Herramienta 3: Actualizar Estado de Solicitud ---
 def update_travel_request_status(request_id: str, new_status: str) -> str:
     """Actualiza el estado de una solicitud de viaje específica en BigQuery.
-
     Args:
         request_id (str): ID de la solicitud a actualizar.
         new_status (str): Nuevo estado (ej. 'Aprobada', 'Rechazada', 'Cancelada').
-
     Returns:
         str: Mensaje de confirmación o error.
     """
     valid_statuses = ["Registrada", "Pendiente de Aprobación", "Aprobada", "Rechazada", "Reservada", "Completada", "Cancelada"]
-    capitalized_new_status = new_status.strip().capitalize()
     
-    if "pendiente de aprobaci" in new_status.lower():
-        capitalized_new_status = "Pendiente de Aprobación"
-    elif "registrada" in new_status.lower():
-        capitalized_new_status = "Registrada"
-    elif "aprobada" in new_status.lower():
-        capitalized_new_status = "Aprobada"
-    elif "rechazada" in new_status.lower():
-        capitalized_new_status = "Rechazada"
-    elif "reservada" in new_status.lower():
-        capitalized_new_status = "Reservada"
-    elif "completada" in new_status.lower():
-        capitalized_new_status = "Completada"
-    elif "cancelada" in new_status.lower():
-        capitalized_new_status = "Cancelada"
+    status_map = {
+        "registrada": "Registrada",
+        "pendiente de aprobación": "Pendiente de Aprobación",
+        "pendiente": "Pendiente de Aprobación",
+        "aprobada": "Aprobada",
+        "rechazada": "Rechazada",
+        "reservada": "Reservada",
+        "completada": "Completada",
+        "cancelada": "Cancelada"
+    }
+    normalized_new_status = new_status.lower().strip()
+    final_status = status_map.get(normalized_new_status)
 
-    if capitalized_new_status not in valid_statuses:
-        return f"Error: '{new_status}' (como '{capitalized_new_status}') no es un estado válido. Válidos: {', '.join(valid_statuses)}."
+    if not final_status:
+        capitalized_status_direct = new_status.strip().capitalize()
+        if capitalized_status_direct in valid_statuses:
+             final_status = capitalized_status_direct
+        else:
+            return f"Error: '{new_status}' no es un estado válido. Válidos: {', '.join(valid_statuses)}."
 
     try:
         client = bigquery.Client()
         table_ref_str = f"{BIGQUERY_PROJECT_ID}.{BIGQUERY_DATASET_ID}.{BIGQUERY_TABLE_ID}"
         query = f"""
             UPDATE `{table_ref_str}`
-            SET status = @new_status_param, timestamp = @current_timestamp_param 
-            WHERE request_id = @request_id_param 
+            SET status = @new_status_param, timestamp = @current_timestamp_param
+            WHERE request_id = @request_id_param
         """
         job_config = bigquery.QueryJobConfig(
             query_parameters=[
-                bigquery.ScalarQueryParameter("new_status_param", "STRING", capitalized_new_status),
+                bigquery.ScalarQueryParameter("new_status_param", "STRING", final_status),
                 bigquery.ScalarQueryParameter("request_id_param", "STRING", request_id),
                 bigquery.ScalarQueryParameter("current_timestamp_param", "TIMESTAMP", datetime.datetime.now(datetime.timezone.utc).isoformat())
             ]
@@ -329,11 +348,20 @@ def update_travel_request_status(request_id: str, new_status: str) -> str:
         query_job.result()
 
         if query_job.num_dml_affected_rows is not None and query_job.num_dml_affected_rows > 0:
-            success_message = f"Solicitud ID '{request_id}' actualizada a '{capitalized_new_status}'."
+            success_message = f"Solicitud ID '{request_id}' actualizada a '{final_status}'."
             print(f"[LOG update_travel_request_status]: {success_message}")
             return success_message
         else:
-            not_found_message = f"No se encontró solicitud ID '{request_id}' o el estado ya era '{capitalized_new_status}'."
+            check_query = f"SELECT status FROM `{table_ref_str}` WHERE request_id = @request_id_param"
+            check_job_config = bigquery.QueryJobConfig(query_parameters=[bigquery.ScalarQueryParameter("request_id_param", "STRING", request_id)])
+            check_job = client.query(check_query, job_config=check_job_config)
+            check_results = list(check_job.result())
+            if not check_results:
+                 not_found_message = f"No se encontró solicitud con ID '{request_id}'."
+            elif check_results[0].status == final_status:
+                 not_found_message = f"La solicitud ID '{request_id}' ya estaba en estado '{final_status}'. No se realizaron cambios."
+            else:
+                 not_found_message = f"No se pudo actualizar la solicitud ID '{request_id}'. Razón desconocida."
             print(f"[LOG update_travel_request_status]: {not_found_message}")
             return not_found_message
     except Exception as e:
@@ -342,7 +370,7 @@ def update_travel_request_status(request_id: str, new_status: str) -> str:
         return error_message
 
 # --- Definición del Agente ---
-root_agent = LlmAgent(
+company_travel_agent = LlmAgent(
     name="CompanyTravelAgent",
     description="Agente para gestionar solicitudes de viaje: registrar, consultar y actualizar estados en BigQuery.",
     instruction=TRAVEL_AGENT_INSTRUCTION,
@@ -351,7 +379,7 @@ root_agent = LlmAgent(
         request_travel_booking_logic,
         get_travel_requests_by_status,
         update_travel_request_status
-    ]
+    ],
 )
 
 # ADK buscará esta variable 'agent' por defecto en el paquete.

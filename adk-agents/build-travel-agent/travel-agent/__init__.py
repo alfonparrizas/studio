@@ -1,2 +1,2 @@
 # This file makes the directory a Python package
-from . import agent
+from .agent import agent
